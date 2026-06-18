@@ -79,3 +79,51 @@ def test_cyclic_xref_prev_terminates():
         warnings.simplefilter("ignore")
         reader = PdfReader(BytesIO(pdf))  # must not hang on the /Prev cycle
         assert len(reader.pages) == 1
+
+
+# --- CVE-2026-41168: oversized object-stream /N ---------------------------
+
+class _FakeIndirect(object):
+    def __init__(self, obj):
+        self._obj = obj
+
+    def get_object(self):
+        return self._obj
+
+
+class _Ref(object):
+    idnum = 5
+    generation = 0
+
+
+def test_objstm_N_is_clamped(monkeypatch):
+    from PyPDF2 import _reader as reader_mod
+    from PyPDF2.generic import (
+        DecodedStreamObject,
+        NameObject,
+        NumberObject,
+    )
+
+    reader = PdfReader.__new__(PdfReader)
+    reader.strict = False
+    reader.xref_objStm = {5: (7, 0)}
+
+    objstm = DecodedStreamObject()
+    objstm[NameObject("/Type")] = NameObject("/ObjStm")
+    objstm[NameObject("/N")] = NumberObject(10 ** 9)  # absurd /N
+    objstm[NameObject("/First")] = NumberObject(4)
+    # entry table "5 0 " then object 5's body (the integer 42) at /First,
+    # with a trailing delimiter so the number parses cleanly.
+    objstm._data = b"5 0 42 "
+
+    # Intercept the IndirectObject(...).get_object() lookup for the ObjStm.
+    monkeypatch.setattr(
+        reader_mod, "IndirectObject", lambda num, gen, pdf: _FakeIndirect(objstm)
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # The /N clamp must not break resolution of a valid object even when
+        # /N is absurd: object 5 is found and returned.
+        result = reader._get_object_from_stream(_Ref())
+    assert int(result) == 42

@@ -1088,7 +1088,23 @@ class PdfReader(object):
         # /N is the number of indirect objects in the stream
         assert idx < obj_stm["/N"]
         stream_data = BytesIO(b_(obj_stm.get_data()))
-        for i in range(obj_stm["/N"]):
+        # CVE-2026-41168: a crafted /N far larger than the stream can hold
+        # would force millions of read iterations. The smallest possible
+        # "objnum offset" pair is 3 bytes ("0 0"), so clamp /N accordingly.
+        nb = int(obj_stm["/N"])
+        max_nb = len(stream_data.getvalue()) // 3 + 1
+        if nb > max_nb:
+            if self.strict:
+                raise PdfReadError(
+                    "/N (%d) exceeds the maximum the object stream can hold (%d)."
+                    % (nb, max_nb)
+                )
+            warnings.warn(
+                "/N (%d) exceeds the maximum the object stream can hold (%d);"
+                " limiting." % (nb, max_nb)
+            )
+            nb = max_nb
+        for i in range(nb):
             readNonWhitespace(stream_data)
             stream_data.seek(-1, 1)
             objnum = NumberObject.read_from_stream(stream_data)
@@ -1548,6 +1564,33 @@ class PdfReader(object):
         assert len(entry_sizes) >= 3
         if self.strict and len(entry_sizes) > 3:
             raise PdfReadError("Too many entry sizes: %s" % entry_sizes)
+
+        # CVE-2026-41168: a crafted /Index (or /Size) subsection count far
+        # larger than the xref stream can hold would force excessive iteration.
+        # Clamp the per-subsection counts (odd elements of idx_pairs) to what
+        # the stream data can actually contain.
+        min_entry_bytes = max(
+            sum(int(entry_sizes[i]) for i in range(min(len(entry_sizes), 3))), 1
+        )
+        max_entries = len(stream_data.getvalue()) // min_entry_bytes + 1
+        sanitized_pairs = []
+        total_entries = 0
+        for i in range(len(idx_pairs)):
+            value = int(idx_pairs[i])
+            if i % 2 == 1:  # a subsection entry count
+                if total_entries + value > max_entries:
+                    if self.strict:
+                        raise PdfReadError(
+                            "Total xref entries (%d) exceed maximum (%d)."
+                            % (total_entries + value, max_entries)
+                        )
+                    value = max(0, max_entries - total_entries)
+                    warnings.warn(
+                        "Clamping xref subsection count to %d." % value
+                    )
+                total_entries += value
+            sanitized_pairs.append(value)
+        idx_pairs = sanitized_pairs
 
         def get_entry(i):
             # Reads the correct number of bytes for each entry. See the

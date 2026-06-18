@@ -1347,7 +1347,18 @@ class PdfReader(object):
         self.xref = {}
         self.xref_objStm = {}
         self.trailer = DictionaryObject()
+        # CVE-2026-27628: a malformed PDF whose xref /Prev entries form a cycle
+        # made this loop follow /Prev forever. Track visited offsets and stop
+        # if one repeats.
+        visited_xref_offsets = set()
         while True:
+            if startxref in visited_xref_offsets:
+                warnings.warn(
+                    "Circular xref /Prev chain detected at offset %s; stopping."
+                    % startxref
+                )
+                break
+            visited_xref_offsets.add(startxref)
             # load the xref table
             stream.seek(startxref, 0)
             x = stream.read(1)

@@ -50,6 +50,7 @@ if version_info < (3, 0):
 else:
     from io import StringIO
 
+import binascii
 import struct
 import zlib
 
@@ -169,25 +170,24 @@ class ASCIIHexDecode(object):
         :return: a string conversion in base-7 ASCII, where each of its values
             v is such that 0 <= ord(v) <= 127.
         """
-        retval = ""
-        hex_pair = ""
-        index = 0
-        while True:
-            if index >= len(data):
-                raise PdfStreamError("Unexpected EOD in ASCIIHexDecode")
-            char = data[index]
-            if char == ">":
-                break
-            elif char.isspace():
-                index += 1
-                continue
-            hex_pair += char
-            if len(hex_pair) == 2:
-                retval += chr(int(hex_pair, base=16))
-                hex_pair = ""
-            index += 1
-        assert hex_pair == ""
-        return retval
+        # CVE-2026-28804: the previous character-by-character accumulation
+        # (retval += ..., hex_pair += ...) is quadratic, so a large
+        # /ASCIIHexDecode stream caused excessive CPU time. Locate the EOD
+        # marker once, strip whitespace, and bulk-decode with binascii.
+        eod = data.find(">")
+        if eod == -1:
+            raise PdfStreamError("Unexpected EOD in ASCIIHexDecode")
+        hex_str = b"".join(data[:eod].split()) if isinstance(
+            data, bytes
+        ) else "".join(data[:eod].split())
+        # Per ISO 32000 §7.4.2, a final odd hex digit is assumed to be
+        # followed by a "0".
+        if len(hex_str) % 2 == 1:
+            hex_str += b"0" if isinstance(hex_str, bytes) else "0"
+        try:
+            return binascii.unhexlify(hex_str)
+        except (binascii.Error, TypeError):
+            raise PdfStreamError("Invalid hexadecimal data in ASCIIHexDecode")
 
 
 class LZWDecode(object):

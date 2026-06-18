@@ -29,7 +29,6 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-import re
 import struct
 import sys
 import warnings
@@ -1586,17 +1585,64 @@ class PdfReader(object):
             #     return 4
         return 0
 
+    @staticmethod
+    def _find_pdf_objects(data):
+        # CVE-2026-22691: locate "<id> <gen> obj" markers with a manual scan
+        # instead of a regex that backtracks catastrophically on input with
+        # long whitespace runs. Yields (idnum, generation, idnum_start).
+        # Uses 1-byte slices (data[i:i+1]) so it works on Py2 (str) and Py3
+        # (bytes) alike.
+        ws = (b" ", b"\t", b"\n", b"\r", b"\x0c", b"\x00")
+        sep = (b" ", b"\t")
+        index = 0
+        while True:
+            index = data.find(b"obj", index)
+            if index == -1:
+                return
+            j = index - 1
+            # whitespace between the generation number and 'obj'
+            had_ws = False
+            while j >= 0 and data[j : j + 1] in sep:
+                j -= 1
+                had_ws = True
+            if not had_ws:
+                index += 3
+                continue
+            # generation number (digits, scanned backwards)
+            gen_end = j + 1
+            while j >= 0 and b"0" <= data[j : j + 1] <= b"9":
+                j -= 1
+            gen_start = j + 1
+            if gen_start == gen_end:
+                index += 3
+                continue
+            # whitespace between the object number and the generation
+            while j >= 0 and data[j : j + 1] in sep:
+                j -= 1
+            # object number (digits, scanned backwards)
+            id_end = j + 1
+            while j >= 0 and b"0" <= data[j : j + 1] <= b"9":
+                j -= 1
+            id_start = j + 1
+            if id_start == id_end:
+                index += 3
+                continue
+            # the object number must itself be preceded by whitespace / BOF
+            if id_start > 0 and data[id_start - 1 : id_start] not in ws:
+                index += 3
+                continue
+            yield int(data[id_start:id_end]), int(data[gen_start:gen_end]), id_start
+            index += 3
+
     def _rebuild_xref_table(self, stream):
         self.xref = {}
         stream.seek(0, 0)
         f_ = stream.read(-1)
 
-        for m in re.finditer(b_(r"[\r\n \t][ \t]*(\d+)[ \t]+(\d+)[ \t]+obj"), f_):
-            idnum = int(m.group(1))
-            generation = int(m.group(2))
+        for idnum, generation, start in self._find_pdf_objects(f_):
             if generation not in self.xref:
                 self.xref[generation] = {}
-            self.xref[generation][idnum] = m.start(1)
+            self.xref[generation][idnum] = start
         trailer_pos = f_.rfind(b"trailer") - len(f_) + 7
         stream.seek(trailer_pos, 2)
         # code below duplicated

@@ -19,7 +19,20 @@ except ImportError:  # Python 2
 
 from PyPDF2 import generic
 from PyPDF2.errors import PdfReadError
-from PyPDF2.generic import DictionaryObject, NameObject, TreeObject
+from PyPDF2.generic import (
+    ArrayObject,
+    ContentStream,
+    DecodedStreamObject,
+    DictionaryObject,
+    NameObject,
+    TreeObject,
+)
+
+
+def _stream(data):
+    so = DecodedStreamObject()
+    so._data = data
+    return so
 
 
 def _node(**kv):
@@ -67,3 +80,26 @@ def test_small_stream_length_ok():
     data = b"<< /Length 3 >>\nstream\nabc\nendstream"
     obj = generic.DictionaryObject.read_from_stream(BytesIO(data), pdf)
     assert obj.get_data() in (b"abc", "abc")
+
+
+# --- CVE-2026-33123: array-based ContentStream caps -----------------------
+
+def test_content_stream_array_element_cap(monkeypatch):
+    monkeypatch.setattr(generic, "CONTENT_STREAM_ARRAY_MAX_LENGTH", 2)
+    arr = ArrayObject([_stream(b"q\n"), _stream(b"Q\n"), _stream(b"q\n")])
+    with pytest.raises(PdfReadError):
+        ContentStream(arr, Mock())
+
+
+def test_content_stream_array_output_cap(monkeypatch):
+    monkeypatch.setattr(generic, "MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH", 3)
+    arr = ArrayObject([_stream(b"q\n"), _stream(b"Q\n")])  # 4 bytes > 3
+    with pytest.raises(PdfReadError):
+        ContentStream(arr, Mock())
+
+
+def test_content_stream_array_ok():
+    arr = ArrayObject([_stream(b"q\n"), _stream(b"Q\n")])
+    cs = ContentStream(arr, Mock())
+    assert len(cs.operations) == 2
+

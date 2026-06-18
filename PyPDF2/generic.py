@@ -68,6 +68,10 @@ logger = logging.getLogger(__name__)
 # stream /Length. Set to 0 to disable (only safe for fully trusted input).
 MAX_DECLARED_STREAM_LENGTH = 75000000  # 75 MB
 
+# CVE-2026-33123: bound array-based content streams. Set to 0 to disable.
+CONTENT_STREAM_ARRAY_MAX_LENGTH = 10000  # max number of array elements
+MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH = 75000000  # 75 MB total concatenated
+
 ObjectPrefix = b_("/<[tf(n%")
 NumberSigns = b_("+-")
 IndirectPattern = re.compile(b_(r"[+-]?(\d+)\s+(\d+)\s+R[^a-zA-Z]"))
@@ -1220,10 +1224,32 @@ class ContentStream(DecodedStreamObject):
         # multiple StreamObjects to be cat'd together.
         stream = stream.get_object()
         if isinstance(stream, ArrayObject):
-            data = b_("")
+            # CVE-2026-33123: bound both the number of array elements and the
+            # total concatenated size so a crafted array-based content stream
+            # cannot exhaust CPU/memory.
+            if (
+                CONTENT_STREAM_ARRAY_MAX_LENGTH
+                and len(stream) > CONTENT_STREAM_ARRAY_MAX_LENGTH
+            ):
+                raise PdfReadError(
+                    "Content stream array has %d elements, exceeding the "
+                    "maximum of %d." % (len(stream), CONTENT_STREAM_ARRAY_MAX_LENGTH)
+                )
+            parts = []
+            total = 0
             for s in stream:
-                data += b_(s.get_object().get_data())
-            stream = BytesIO(b_(data))
+                new_data = b_(s.get_object().get_data())
+                total += len(new_data)
+                if (
+                    MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH
+                    and total > MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH
+                ):
+                    raise PdfReadError(
+                        "Content stream array output exceeds the maximum of "
+                        "%d bytes." % MAX_ARRAY_BASED_STREAM_OUTPUT_LENGTH
+                    )
+                parts.append(new_data)
+            stream = BytesIO(b_("").join(parts))
         else:
             stream = BytesIO(b_(stream.get_data()))
         self.__parseContentStream(stream)

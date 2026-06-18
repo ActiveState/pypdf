@@ -895,9 +895,22 @@ class TreeObject(DictionaryObject):
                 raise StopIteration
 
         child = self["/First"]
+        last = self["/Last"]
+        # CVE-2026-27024: a crafted outline whose /Next chain forms a cycle
+        # that never reaches /Last made this loop run forever. Track visited
+        # nodes and stop on a repeat.
+        visited = set()
         while True:
+            child_id = id(child)
+            if child_id in visited:
+                logger.warning("Cycle detected in TreeObject.children; stopping")
+                if sys.version_info >= (3, 5):  # PEP 479
+                    return
+                else:
+                    raise StopIteration
+            visited.add(child_id)
             yield child
-            if child == self["/Last"]:
+            if child == last:
                 if sys.version_info >= (3, 5):  # PEP 479
                     return
                 else:

@@ -2,10 +2,31 @@ import datetime
 import decimal
 import re
 import warnings
-from xml.dom.minidom import parseString
+from xml.dom.expatbuilder import ExpatBuilderNS
+from xml.parsers.expat import ExpatError
 
 from ._utils import DEPR_MSG, u_
 from .generic import PdfObject
+
+
+class _SafeExpatBuilder(ExpatBuilderNS):
+    """Namespace-aware XML builder that refuses all entity declarations.
+
+    CVE-2026-40260: parsing untrusted XMP with the default parser allowed XML
+    entity expansion (quadratic blow-up, which libexpat does not block) to
+    exhaust memory. Rejecting any entity declaration outright closes that.
+    """
+
+    def _deny_entity(self, *args):
+        raise ExpatError("Entity declarations are not permitted in XMP")
+
+    def install(self, parser):
+        ExpatBuilderNS.install(self, parser)
+        parser.EntityDeclHandler = self._deny_entity
+
+
+def _safe_parse_xmp(data):
+    return _SafeExpatBuilder().parseString(data)
 
 RDF_NAMESPACE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
@@ -88,7 +109,7 @@ class XmpInformation(PdfObject):
 
     def __init__(self, stream):
         self.stream = stream
-        doc_root = parseString(self.stream.get_data())
+        doc_root = _safe_parse_xmp(self.stream.get_data())
         self.rdfRoot = doc_root.getElementsByTagNameNS(RDF_NAMESPACE, "RDF")[0]
         self.cache = {}
 

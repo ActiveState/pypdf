@@ -190,16 +190,22 @@ class ASCIIHexDecode(object):
             raise PdfStreamError("Invalid hexadecimal data in ASCIIHexDecode")
 
 
+# CVE-2025-62708 / CVE-2025-66019: bound LZWDecode output so a small stream
+# cannot amplify into gigabytes of memory. Set to 0 to disable (trusted input).
+LZW_MAX_OUTPUT_LENGTH = 75000000  # 75 MB
+
+
 class LZWDecode(object):
     """Taken from:
     http://www.java2s.com/Open-Source/Java-Document/PDF/PDF-Renderer/com/sun/pdfview/decode/LZWDecode.java.htm
     """
 
     class Decoder(object):
-        def __init__(self, data):
+        def __init__(self, data, max_output_length=LZW_MAX_OUTPUT_LENGTH):
             self.STOP = 257
             self.CLEARDICT = 256
             self.data = data
+            self.max_output_length = max_output_length
             self.bytepos = 0
             self.bitpos = 0
             self.dict = [""] * 4096
@@ -246,6 +252,11 @@ class LZWDecode(object):
             cW = self.CLEARDICT
             baos = ""
             while True:
+                if self.max_output_length and len(baos) > self.max_output_length:
+                    raise PdfReadError(
+                        "Output exceeds maximum allowed length (%d bytes) "
+                        "while decoding LZW stream." % self.max_output_length
+                    )
                 pW = cW
                 cW = self.next_code()
                 if cW == -1:

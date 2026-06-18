@@ -35,3 +35,18 @@ def test_flate_recovery_input_is_capped(monkeypatch):
         filters.decompress(garbage)
 
 
+def test_flate_columns_capped():
+    # CVE-2026-41312: an absurd /Columns must be rejected before allocation.
+    data = zlib.compress(b"x" * 16)
+    with pytest.raises(PdfReadError):
+        filters.FlateDecode.decode(
+            data, {"/Predictor": 12, "/Columns": 999999999}
+        )
+
+
+def test_flate_columns_normal_ok():
+    # A small /Columns still decodes (predictor 1 == no prediction path here).
+    data = zlib.compress(b"abc")
+    assert filters.FlateDecode.decode(data, {"/Predictor": 1}) == b"abc"
+
+

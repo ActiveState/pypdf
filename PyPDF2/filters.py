@@ -134,6 +134,14 @@ class FlateDecode(object):
             # §7.4.4.3 LZWDecode and FlateDecode Parameters, Table 8
             columns = decodeParms.get(LZW.COLUMNS, 1)
 
+            # CVE-2026-41312: reject absurd /Columns values that would make the
+            # per-row prediction buffer (rowlength = columns + 1) exhaust memory.
+            if FLATE_MAX_COLUMNS and int(columns) > FLATE_MAX_COLUMNS:
+                raise PdfReadError(
+                    "Number of columns (%d) exceeds maximum allowed (%d)."
+                    % (int(columns), FLATE_MAX_COLUMNS)
+                )
+
             # PNG prediction:
             if 10 <= predictor <= 15:
                 data = FlateDecode._decode_png_prediction(data, columns)

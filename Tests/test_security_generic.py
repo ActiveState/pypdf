@@ -8,6 +8,17 @@ Regression tests for the generic.py parsing-limit / cycle-guard backports:
 """
 import pytest
 
+try:
+    from io import BytesIO
+except ImportError:  # pragma: no cover
+    from cStringIO import StringIO as BytesIO
+try:
+    from unittest.mock import Mock
+except ImportError:  # Python 2
+    from mock import Mock
+
+from PyPDF2 import generic
+from PyPDF2.errors import PdfReadError
 from PyPDF2.generic import DictionaryObject, NameObject, TreeObject
 
 
@@ -40,3 +51,19 @@ def test_children_cycle_terminates():
     t[NameObject("/Last")] = DictionaryObject()  # unreachable sentinel
     kids = list(t.children())  # must terminate rather than hang
     assert kids == [a, b]
+
+
+# --- CVE-2026-31826: declared stream /Length cap --------------------------
+
+def test_declared_stream_length_capped():
+    pdf = Mock(strict=False)
+    data = b"<< /Length 999999999 >>\nstream\n"
+    with pytest.raises(PdfReadError):
+        generic.DictionaryObject.read_from_stream(BytesIO(data), pdf)
+
+
+def test_small_stream_length_ok():
+    pdf = Mock(strict=False)
+    data = b"<< /Length 3 >>\nstream\nabc\nendstream"
+    obj = generic.DictionaryObject.read_from_stream(BytesIO(data), pdf)
+    assert obj.get_data() in (b"abc", "abc")

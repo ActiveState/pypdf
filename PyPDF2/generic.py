@@ -63,6 +63,11 @@ else:
     from io import BytesIO, StringIO
 
 logger = logging.getLogger(__name__)
+
+# CVE-2026-31826: refuse to pre-allocate a read buffer for an absurd declared
+# stream /Length. Set to 0 to disable (only safe for fully trusted input).
+MAX_DECLARED_STREAM_LENGTH = 75000000  # 75 MB
+
 ObjectPrefix = b_("/<[tf(n%")
 NumberSigns = b_("+-")
 IndirectPattern = re.compile(b_(r"[+-]?(\d+)\s+(\d+)\s+R[^a-zA-Z]"))
@@ -835,6 +840,17 @@ class DictionaryObject(dict, PdfObject):
                 t = stream.tell()
                 length = pdf.get_object(length)
                 stream.seek(t, 0)
+            # CVE-2026-31826: a crafted /Length (e.g. 2 GB) would make
+            # stream.read(length) pre-allocate a huge buffer. Reject it.
+            if (
+                isinstance(length, int)
+                and MAX_DECLARED_STREAM_LENGTH
+                and length > MAX_DECLARED_STREAM_LENGTH
+            ):
+                raise PdfReadError(
+                    "Declared stream length (%d bytes) exceeds maximum allowed "
+                    "(%d bytes)." % (length, MAX_DECLARED_STREAM_LENGTH)
+                )
             data["__streamdata__"] = stream.read(length)
             e = readNonWhitespace(stream)
             ndstream = stream.read(8)

@@ -29,7 +29,6 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-import re
 import struct
 import sys
 import warnings
@@ -1089,7 +1088,23 @@ class PdfReader(object):
         # /N is the number of indirect objects in the stream
         assert idx < obj_stm["/N"]
         stream_data = BytesIO(b_(obj_stm.get_data()))
-        for i in range(obj_stm["/N"]):
+        # CVE-2026-41168: a crafted /N far larger than the stream can hold
+        # would force millions of read iterations. The smallest possible
+        # "objnum offset" pair is 3 bytes ("0 0"), so clamp /N accordingly.
+        nb = int(obj_stm["/N"])
+        max_nb = len(stream_data.getvalue()) // 3 + 1
+        if nb > max_nb:
+            if self.strict:
+                raise PdfReadError(
+                    "/N (%d) exceeds the maximum the object stream can hold (%d)."
+                    % (nb, max_nb)
+                )
+            warnings.warn(
+                "/N (%d) exceeds the maximum the object stream can hold (%d);"
+                " limiting." % (nb, max_nb)
+            )
+            nb = max_nb
+        for i in range(nb):
             readNonWhitespace(stream_data)
             stream_data.seek(-1, 1)
             objnum = NumberObject.read_from_stream(stream_data)
@@ -1348,7 +1363,18 @@ class PdfReader(object):
         self.xref = {}
         self.xref_objStm = {}
         self.trailer = DictionaryObject()
+        # CVE-2026-27628: a malformed PDF whose xref /Prev entries form a cycle
+        # made this loop follow /Prev forever. Track visited offsets and stop
+        # if one repeats.
+        visited_xref_offsets = set()
         while True:
+            if startxref in visited_xref_offsets:
+                warnings.warn(
+                    "Circular xref /Prev chain detected at offset %s; stopping."
+                    % startxref
+                )
+                break
+            visited_xref_offsets.add(startxref)
             # load the xref table
             stream.seek(startxref, 0)
             x = stream.read(1)
@@ -1539,6 +1565,33 @@ class PdfReader(object):
         if self.strict and len(entry_sizes) > 3:
             raise PdfReadError("Too many entry sizes: %s" % entry_sizes)
 
+        # CVE-2026-41168: a crafted /Index (or /Size) subsection count far
+        # larger than the xref stream can hold would force excessive iteration.
+        # Clamp the per-subsection counts (odd elements of idx_pairs) to what
+        # the stream data can actually contain.
+        min_entry_bytes = max(
+            sum(int(entry_sizes[i]) for i in range(min(len(entry_sizes), 3))), 1
+        )
+        max_entries = len(stream_data.getvalue()) // min_entry_bytes + 1
+        sanitized_pairs = []
+        total_entries = 0
+        for i in range(len(idx_pairs)):
+            value = int(idx_pairs[i])
+            if i % 2 == 1:  # a subsection entry count
+                if total_entries + value > max_entries:
+                    if self.strict:
+                        raise PdfReadError(
+                            "Total xref entries (%d) exceed maximum (%d)."
+                            % (total_entries + value, max_entries)
+                        )
+                    value = max(0, max_entries - total_entries)
+                    warnings.warn(
+                        "Clamping xref subsection count to %d." % value
+                    )
+                total_entries += value
+            sanitized_pairs.append(value)
+        idx_pairs = sanitized_pairs
+
         def get_entry(i):
             # Reads the correct number of bytes for each entry. See the
             # discussion of the W parameter in PDF spec table 17.
@@ -1586,17 +1639,64 @@ class PdfReader(object):
             #     return 4
         return 0
 
+    @staticmethod
+    def _find_pdf_objects(data):
+        # CVE-2026-22691: locate "<id> <gen> obj" markers with a manual scan
+        # instead of a regex that backtracks catastrophically on input with
+        # long whitespace runs. Yields (idnum, generation, idnum_start).
+        # Uses 1-byte slices (data[i:i+1]) so it works on Py2 (str) and Py3
+        # (bytes) alike.
+        ws = (b" ", b"\t", b"\n", b"\r", b"\x0c", b"\x00")
+        sep = (b" ", b"\t")
+        index = 0
+        while True:
+            index = data.find(b"obj", index)
+            if index == -1:
+                return
+            j = index - 1
+            # whitespace between the generation number and 'obj'
+            had_ws = False
+            while j >= 0 and data[j : j + 1] in sep:
+                j -= 1
+                had_ws = True
+            if not had_ws:
+                index += 3
+                continue
+            # generation number (digits, scanned backwards)
+            gen_end = j + 1
+            while j >= 0 and b"0" <= data[j : j + 1] <= b"9":
+                j -= 1
+            gen_start = j + 1
+            if gen_start == gen_end:
+                index += 3
+                continue
+            # whitespace between the object number and the generation
+            while j >= 0 and data[j : j + 1] in sep:
+                j -= 1
+            # object number (digits, scanned backwards)
+            id_end = j + 1
+            while j >= 0 and b"0" <= data[j : j + 1] <= b"9":
+                j -= 1
+            id_start = j + 1
+            if id_start == id_end:
+                index += 3
+                continue
+            # the object number must itself be preceded by whitespace / BOF
+            if id_start > 0 and data[id_start - 1 : id_start] not in ws:
+                index += 3
+                continue
+            yield int(data[id_start:id_end]), int(data[gen_start:gen_end]), id_start
+            index += 3
+
     def _rebuild_xref_table(self, stream):
         self.xref = {}
         stream.seek(0, 0)
         f_ = stream.read(-1)
 
-        for m in re.finditer(b_(r"[\r\n \t][ \t]*(\d+)[ \t]+(\d+)[ \t]+obj"), f_):
-            idnum = int(m.group(1))
-            generation = int(m.group(2))
+        for idnum, generation, start in self._find_pdf_objects(f_):
             if generation not in self.xref:
                 self.xref[generation] = {}
-            self.xref[generation][idnum] = m.start(1)
+            self.xref[generation][idnum] = start
         trailer_pos = f_.rfind(b"trailer") - len(f_) + 7
         stream.seek(trailer_pos, 2)
         # code below duplicated

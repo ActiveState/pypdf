@@ -730,7 +730,7 @@ class PdfReader(object):
         """Read-only property."""
         return self._get_outlines()
 
-    def _get_outlines(self, node=None, outlines=None):
+    def _get_outlines(self, node=None, outlines=None, visited=None):
         """
         Retrieve the document outline present in the document.
 
@@ -758,8 +758,19 @@ class PdfReader(object):
         if node is None:
             return outlines
 
+        if visited is None:
+            visited = set()
+
         # see if there are any more outlines
         while True:
+            # CVE-2026-24688: a crafted outline whose /Next chain loops back to
+            # an already-seen node made this walk run forever. Stop on a repeat.
+            node_id = id(node)
+            if node_id in visited:
+                warnings.warn("Cycle detected in document outline; stopping")
+                break
+            visited.add(node_id)
+
             outline = self._build_outline(node)
             if outline:
                 outlines.append(outline)
@@ -767,7 +778,7 @@ class PdfReader(object):
             # check for sub-outlines
             if "/First" in node:
                 sub_outlines = []
-                self._get_outlines(node["/First"], sub_outlines)
+                self._get_outlines(node["/First"], sub_outlines, visited.copy())
                 if sub_outlines:
                     outlines.append(sub_outlines)
 

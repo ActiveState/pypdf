@@ -54,18 +54,50 @@ import binascii
 import struct
 import zlib
 
+# Limits to mitigate decompression-bomb / excessive-allocation DoS attacks
+# (CVE-2025-55197, CVE-2026-27026, CVE-2026-41312). Set a limit to 0 to disable
+# it (only safe for fully trusted input).
+ZLIB_MAX_OUTPUT_LENGTH = 75000000  # 75 MB cap on FlateDecode output
+ZLIB_MAX_RECOVERY_INPUT_LENGTH = 5000000  # 5 MB cap on byte-by-byte recovery
+FLATE_MAX_COLUMNS = 250000  # max /Columns for the PNG predictor row length
+
 
 def decompress(data):
+    # CVE-2025-55197: bound the decompressed output so a small "zip bomb"
+    # FlateDecode stream cannot exhaust memory.
     try:
-        return zlib.decompress(data)
+        decompressor = zlib.decompressobj()
+        if ZLIB_MAX_OUTPUT_LENGTH:
+            result = decompressor.decompress(data, ZLIB_MAX_OUTPUT_LENGTH)
+            if decompressor.unconsumed_tail:
+                raise PdfReadError(
+                    "Output exceeds maximum allowed length (%d bytes) while "
+                    "decompressing FlateDecode stream." % ZLIB_MAX_OUTPUT_LENGTH
+                )
+            return result
+        return decompressor.decompress(data)
     except zlib.error:
+        # Fallback for malformed/gzip-wrapped streams: decompress byte by byte.
+        # CVE-2026-27026: cap the input scanned here so a large malformed
+        # stream cannot pin the CPU; CVE-2025-55197 output cap also applies.
         d = zlib.decompressobj(zlib.MAX_WBITS | 32)
         result_str = b""
-        for b in [data[i : i + 1] for i in range(len(data))]:
+        for i in range(len(data)):
+            if ZLIB_MAX_RECOVERY_INPUT_LENGTH and i > ZLIB_MAX_RECOVERY_INPUT_LENGTH:
+                raise PdfReadError(
+                    "Input exceeds maximum recovery length (%d bytes) while "
+                    "decompressing malformed FlateDecode stream."
+                    % ZLIB_MAX_RECOVERY_INPUT_LENGTH
+                )
             try:
-                result_str += d.decompress(b)
+                result_str += d.decompress(data[i : i + 1])
             except zlib.error:
                 pass
+            if ZLIB_MAX_OUTPUT_LENGTH and len(result_str) > ZLIB_MAX_OUTPUT_LENGTH:
+                raise PdfReadError(
+                    "Output exceeds maximum allowed length (%d bytes) while "
+                    "decompressing FlateDecode stream." % ZLIB_MAX_OUTPUT_LENGTH
+                )
         return result_str
 
 
@@ -102,6 +134,14 @@ class FlateDecode(object):
             # The /Columns param. has 1 as the default value; see ISO 32000,
             # §7.4.4.3 LZWDecode and FlateDecode Parameters, Table 8
             columns = decodeParms.get(LZW.COLUMNS, 1)
+
+            # CVE-2026-41312: reject absurd /Columns values that would make the
+            # per-row prediction buffer (rowlength = columns + 1) exhaust memory.
+            if FLATE_MAX_COLUMNS and int(columns) > FLATE_MAX_COLUMNS:
+                raise PdfReadError(
+                    "Number of columns (%d) exceeds maximum allowed (%d)."
+                    % (int(columns), FLATE_MAX_COLUMNS)
+                )
 
             # PNG prediction:
             if 10 <= predictor <= 15:

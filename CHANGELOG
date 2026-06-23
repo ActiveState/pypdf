@@ -1,3 +1,31 @@
+Version 1.28.6.post1, 2026-06-18
+--------------------------------
+
+ActiveState security post-release (PEP 440 .postN) on top of upstream 1.28.6,
+the last Python 2.7-compatible PyPDF2 line. Backports denial-of-service fixes
+from modern pypdf (all advisories are DoS-class; no RCE / information
+disclosure). Each fix raises PdfReadError (rather than the modern
+LimitReachedError) and stays Python 2.7-safe.
+
+Security Fixes (SEC):
+- CVE-2025-55197: bound FlateDecode decompression output (zip bomb).
+- CVE-2026-27026: bound FlateDecode byte-by-byte recovery input.
+- CVE-2026-41312: cap FlateDecode PNG-predictor /Columns.
+- CVE-2026-28804: make ASCIIHexDecode decoding linear (was O(n^2)).
+- CVE-2025-62708 / CVE-2025-66019: bound LZWDecode output.
+- CVE-2026-27024: guard TreeObject.children against cyclic /Next.
+- CVE-2026-31826: cap declared stream /Length before allocation.
+- CVE-2026-33123: bound array-based ContentStream.
+- CVE-2026-22691: replace ReDoS-prone xref-rebuild regex with a linear scan.
+- CVE-2026-27628: detect circular xref /Prev chains.
+- CVE-2026-41168: clamp object-stream /N and xref /Index / /Size counts.
+- CVE-2026-24688: guard the document outline walk against cycles.
+- CVE-2026-40260: block XML entity expansion in XMP parsing.
+
+Not applicable to 1.28.6 (vulnerable code paths absent; documented for the
+record): CVE-2026-22690, CVE-2025-62707, CVE-2026-41313, CVE-2026-41314,
+CVE-2026-27025, CVE-2026-27888, CVE-2026-28351, CVE-2026-33699.
+
 Version 1.28.6, 2022-09-08
 --------------------------
 

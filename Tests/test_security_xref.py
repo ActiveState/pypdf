@@ -8,8 +8,6 @@ Regression tests for the _reader.py xref-parsing hardening backports:
 """
 import warnings
 
-import pytest
-
 try:
     from io import BytesIO
 except ImportError:  # pragma: no cover

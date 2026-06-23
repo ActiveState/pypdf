@@ -50,6 +50,7 @@ if version_info < (3, 0):
 else:
     from io import StringIO
 
+import binascii
 import struct
 import zlib
 
@@ -169,25 +170,29 @@ class ASCIIHexDecode(object):
         :return: a string conversion in base-7 ASCII, where each of its values
             v is such that 0 <= ord(v) <= 127.
         """
-        retval = ""
-        hex_pair = ""
-        index = 0
-        while True:
-            if index >= len(data):
-                raise PdfStreamError("Unexpected EOD in ASCIIHexDecode")
-            char = data[index]
-            if char == ">":
-                break
-            elif char.isspace():
-                index += 1
-                continue
-            hex_pair += char
-            if len(hex_pair) == 2:
-                retval += chr(int(hex_pair, base=16))
-                hex_pair = ""
-            index += 1
-        assert hex_pair == ""
-        return retval
+        # CVE-2026-28804: the previous character-by-character accumulation
+        # (retval += ..., hex_pair += ...) is quadratic, so a large
+        # /ASCIIHexDecode stream caused excessive CPU time. Locate the EOD
+        # marker once, strip whitespace, and bulk-decode with binascii.
+        eod = data.find(">")
+        if eod == -1:
+            raise PdfStreamError("Unexpected EOD in ASCIIHexDecode")
+        hex_str = b"".join(data[:eod].split()) if isinstance(
+            data, bytes
+        ) else "".join(data[:eod].split())
+        # Per ISO 32000 §7.4.2, a final odd hex digit is assumed to be
+        # followed by a "0".
+        if len(hex_str) % 2 == 1:
+            hex_str += b"0" if isinstance(hex_str, bytes) else "0"
+        try:
+            return binascii.unhexlify(hex_str)
+        except (binascii.Error, TypeError):
+            raise PdfStreamError("Invalid hexadecimal data in ASCIIHexDecode")
+
+
+# CVE-2025-62708 / CVE-2025-66019: bound LZWDecode output so a small stream
+# cannot amplify into gigabytes of memory. Set to 0 to disable (trusted input).
+LZW_MAX_OUTPUT_LENGTH = 75000000  # 75 MB
 
 
 class LZWDecode(object):
@@ -196,10 +201,11 @@ class LZWDecode(object):
     """
 
     class Decoder(object):
-        def __init__(self, data):
+        def __init__(self, data, max_output_length=LZW_MAX_OUTPUT_LENGTH):
             self.STOP = 257
             self.CLEARDICT = 256
             self.data = data
+            self.max_output_length = max_output_length
             self.bytepos = 0
             self.bitpos = 0
             self.dict = [""] * 4096
@@ -246,6 +252,11 @@ class LZWDecode(object):
             cW = self.CLEARDICT
             baos = ""
             while True:
+                if self.max_output_length and len(baos) > self.max_output_length:
+                    raise PdfReadError(
+                        "Output exceeds maximum allowed length (%d bytes) "
+                        "while decoding LZW stream." % self.max_output_length
+                    )
                 pW = cW
                 cW = self.next_code()
                 if cW == -1:
